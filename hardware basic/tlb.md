@@ -1,15 +1,19 @@
 # TLB
-* TLB (Translation Lookaside Buffer) 翻译后备缓冲器
+* TLB (Translation Lookaside Buffer) 后备缓冲器
 ### TLB 的组成部分
-![pic/tlb_comp.png](pic/tlb_comp.png)
+<img src="pic/tlb_comp.png" alt="pic/tlb_comp.png" style="zoom:40%;" />
+
 * VPN: virtual page number
 * VPO: virtual page offset
 ### TLB 命中
-![pic/tlb_hit.png](pic/tlb_hit.png)
+<img src="pic/tlb_hit.png" alt="pic/tlb_hit.png" style="zoom:40%;" />
+
 ### TLB 不命中
-![pic/tlb_miss.png](pic/tlb_miss.png)
+<img src="pic/tlb_miss.png" alt="pic/tlb_miss.png" style="zoom:40%;" />
+
 ## 地址翻译的例子
-![pic/core_i7_addr_tsl.png](pic/core_i7_addr_tsl.png)
+<img src="pic/core_i7_addr_tsl.png" alt="pic/core_i7_addr_tsl.png" style="zoom:60%;" />
+
 * x86-64 用虚拟地址的 48 位进行寻址，其中高 36 位为虚拟页号（VPN），低 12 位为虚拟页中的偏移（VPO）
 * L1 TLB 有 16 组，每组 4 个条目
 * 虚拟地址的 36 位 VPN 用来查找 TLB，因为 TLB 有 16 组，所以用 4 位来索引 TLB，即 TLBI，剩下的 32 位作为 TLBT

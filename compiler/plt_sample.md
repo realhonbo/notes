@@ -1,12 +1,19 @@
-# 一个 PLT 的例子
+# PLT  GOT
+
+## 简述
+
+- GOT（Global Offset Table，全局偏移表）是Linux ELF文件中用于定位全局变量和函数的一个表
+- PLT （Procedure Linkage Table，过程链接表）是Linux ELF文件中用于延迟绑定的表，即函数第一次被调用的时候才进行绑定
+
+## 一个 PLT 的例子
 
 * PLT 延迟绑定示意流程如下：
 
-![PLT lazy binding before](pic/plt_before.jpg)
+<img src="pic/plt_before.jpg" alt="PLT lazy binding before" />
 
 * PLT 延迟绑定后调用如下：
 
-![PLT lazy binding after](pic/plt_after.jpg)
+<img src="pic/plt_after.jpg" alt="PLT lazy binding after" />
 
 ## 用于调试 PLT 的源代码
 * 对于 Ubuntu 需要加 GCC `-z lazy` 编译选项，否则编出来的程序不采用 PLT
