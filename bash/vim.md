@@ -1,13 +1,13 @@
 # VIM
 
-```vim&#x20;script
+```bash
           --- l --->              
           | k
         j |   
  <--- h ---
 ```
 
-```vim&#x20;script
+```bash
 w     # 下一个单词头
 e     #          尾
 
@@ -37,9 +37,9 @@ $      # 行末
 <ctrl> b       #          一页
 ```
 
-```vim&#x20;script
+```bash
 <ctrl> 6       # 切回刚刚打开的文件
-
+:set paste     # 粘贴模式 (防止自动缩进引起的混乱)
 :b<number>     # :b6 跳到(已经打开的)第6个文件
 :bn            # 跳到下一个文件
 :bp            # 跳到上一个文件
@@ -47,7 +47,7 @@ $      # 行末
 :e <filename>  # 跳到<filename>文件
 ```
 
-```vim&#x20;script
+```bash
 i          # 在前面插入
 a          # 在后面
 
@@ -61,7 +61,7 @@ u          # 撤销
 <<
 ```
 
-```vim&#x20;script
+```c
 /菜需鲲               // 向前寻找  菜需鲲 
 ?菜需鲲               // 向前寻找  菜需鲲 
 
@@ -74,7 +74,7 @@ u          # 撤销
 :g/<old>/<new>
 ```
 
-```vim&#x20;script
+```bash
 y      # 复制当前行
 10y  # 从当前行的下一行开始, 复制后10行
 v进入可视化模式, 上下移动选中文字, 然后y复制 
@@ -82,12 +82,12 @@ v进入可视化模式, 上下移动选中文字, 然后y复制
 p      # 粘贴
 ```
 
-```vim&#x20;script
+```bash
 ZZ     # :wq
 ZQ     # :q
 ```
 
-```vim&#x20;script
+```bash
 # 执行shell命令
 :!<命令>   # 如 :!find arch/arm/asm -name 'page'
 
