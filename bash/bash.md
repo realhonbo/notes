@@ -152,6 +152,27 @@ network:
                   - 192.168.1.1
             optional: true
 
+network:
+    version: 2
+    wifis:
+        renderer: networkd
+        wlan0:
+            access-points:
+                "Linux01":
+                    password: "mmmmmmmm"
+            dhcp4: false
+            addresses: [192.168.137.62/24]
+            routes:
+              - to: default
+                via: 192.168.1.1
+                metric: 100
+                on-link: true
+            nameservers:
+                addresses:
+                  - 192.168.1.1
+            optional: true
+            
+            
 " 恢复网络代理 "
 unset http_proxy
 unset https_proxy
@@ -279,6 +300,13 @@ $(dir <file>)  ; 获取file的目录
 include_path = $(foreach item,$(dirs), -I$(item)) ; 把dirs改成-Idirs，里面的每一项
 ```
 
+## ROS
+
+```bash
+# 查询包中可用插件
+rospack plugins --attrib=plugin nav_core
+```
+
 ## 重装
 
 ### 程序集
@@ -293,6 +321,8 @@ echo yes | sudo apt install clangd
 echo yes | sudo apt install clang-tidy
 echo yes | sudo apt install bear
 echo yes | sudo apt install net-tools
+echo yes | sudo apt install btop
+echo yes | sudo apt install gpiod
 ```
 
 ### 配置项
