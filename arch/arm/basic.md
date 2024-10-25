@@ -418,6 +418,31 @@ SEVL : 只唤醒当前核心 (send event locally) # ARMv8 feature
 
 ## 内联方法
 
+```c
+// 整体结构示例
+static inline void spin_lock(spinlock_t *spin)
+{
+        spinlock_t origin;
+        unsigned int newval;
+        __asm volatile (
+        "1: ldrex %0, [%2] \n"
+        "   add %1, %0, #1 \n"
+        "   strex %0, %1, [%2] \n"
+        "   teq %0, #0 \n"
+        "   bne 1b"
+        :"=&r"(origin), "=&r"(newval)
+        :"r"(&spin->lock)
+        :"cc" );
+        // 线程尝试获取锁时, number的值保存在寄存器中, 不会从内存中重取
+        // 因此, 这个number就是此线程获取锁时得到的票号
+        while (spin->tickets.number != spin->tickets.next) {
+                wfi();
+                spin->tickets.next = REREAD(spin->tickets.next);
+        }
+        barrier();
+}
+```
+
 ### 输出
 
 ```assembly

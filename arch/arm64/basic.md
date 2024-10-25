@@ -3,7 +3,6 @@
 * 提供 31 个 `64 bit` 的通用寄存器
 * 每个通用寄存器，用 **x** 表示 `64` 位宽，**w** 表示 `32` 位宽
 
-# ABI
 <img src="pic/arm64_gp_reg_abi.png" style="zoom:40%;" >
 
 * 参数寄存器（Argument-Register： **X0-X7**）
@@ -22,6 +21,15 @@
   * **X31**： 堆栈指针寄存器 **SP** 或零寄存器 **ZXR**
 
 <img src = "pic/arm64_stack_frame.png" style="zoom:40%;" >
+
+## 指令
+
+### LDR STR
+
+- 加载存储指令，语法和 ARMv7 基本相同
+- ARMv8 的去掉了 *ldm* 、*stm* 指令，改用 `ldp` 、`stp` ：
+  - `stp	x29, x30, [sp, -32]!`  保存 x29（FP） 与 x30（LR）到栈帧，同时 SP 下移 32 byte
+  - `mov	x29, sp`  更新 x29（FP），使其指向当前栈帧顶部
 
 # 异常
 ## 异常级别

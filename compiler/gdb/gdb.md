@@ -2,6 +2,7 @@
 
 ```bash
 gcc < .cc> -g
+# 向 <exec> 中插入 .debug_str .debug_line .debug_abbrev .debug_info .debug_aranges 等 section，保存调试信息
 
 gdb <exec>  # 或者  gdb启动后指定文件--> (gdb)file/symbol-file <exec>
 

@@ -2,27 +2,29 @@
 ***
 # Architectures
 ## ARM
+
+- [ARM基础概念与常用语法](arch/arm/basic.md)
 - [ARM64 的一些基本概念](arch/arm64/basic.md)
-
-## Intel
-- [AMX](arch/intel/amx.md)
-- [APIC](arch/intel/apic.md)
-- [APIC 虚拟化和虚拟中断](arch/intel/apicv_vintr.md)
-- [Buslock](arch/intel/buslock.md)
-- [Memory Cache Control](arch/intel/cache_control.md)
-- [Multi-Processors Management](arch/intel/MP_management.md)
-- [Linear Address Masking (LAM)](arch/intel/lam.md)
-
-### VT-d
-- [Vt-d Overview](arch/intel/vt-d/vt-d-ov.md)
 
 # Computer Science
 - [Cache](computer_science/cache.md)
-- [TLB](computer_science/tlb.md)
 - [浮点数](computer_science/float.md)
-- [MESI 协议](computer_science/MESI.md)
+
+# Shell
+
+- [Bash 常用语法](shell/bash.md)
+- [Git 常用语法](shell/git.md)
+- [vim 操作](shell/vim.md)
+
+# Tools
+
+- [C/C++ 偏门语法](tools/c_c++.md)
+- [CMakeList 常用语法](tools/CMakeLists.md)
+- [Makefile 常用语法](tools/Makefile.md)
+- [暂未归类的项](tools/other.md)
 
 # Kernel
+
 - [Bottom Half 下半部](kernel/Bottom_Half.md)
 - [时间和定时器](kernel/time.md)
 - [虚拟文件系统（VFS）](kernel/vfs.md)
@@ -98,11 +100,3 @@
 
 ## 主题
 - [KPTI](kernel/issues/kpti/kpti.md)
-
-# Virtualization
-- [docker](virtualization/docker/docker.md)
-## KVM
-- [APIC 虚拟化](virtualization/kvm/apicv.md)
-- [虚拟化异常](virtualization/kvm/exception.md)
-- [Posted Interrupt](virtualization/kvm/posted_interrupt.md)
-- [TDP MMU 缺页](virtualization/kvm/tdp_page_fault.md)
