@@ -1,79 +1,255 @@
-# Linux进程调度（Linux Process Scheduling)
-***
+# Linux 进程调度
+## 默认调度器的演变
+| Operating System          |                          Algorithm                           |
+| ------------------------- | :----------------------------------------------------------: |
+| Linux kernel before 2.6.0 |                         O(n) 调度器                          |
+| Linux kernel 2.6.0–2.6.23 |                         O(1) 调度器                          |
+| Linux kernel after 2.6.23 | [CFS 调度器](https://en.wikipedia.org/wiki/Completely_Fair_Scheduler) |
 
-# 目录
-* [Linux缺省调度器](#linux%E7%BC%BA%E7%9C%81%E8%B0%83%E5%BA%A6%E5%99%A8)
-* [O(1)调度](#o1%E8%B0%83%E5%BA%A6)
-* [完全公平调度（Completely Fair Scheduler）](#%E5%AE%8C%E5%85%A8%E5%85%AC%E5%B9%B3%E8%B0%83%E5%BA%A6completely-fair-scheduler)
-  * [调度的目标](#调度的目标)
-  * [算术级数几何级数与增长率](#算术级数几何级数与增长率)
-  * [基本原理](#基本原理)
-  * [原理解析](#原理解析)
-* [核心调度器](#核心调度器)
-  * [调度器类](#调度器类)
-  * [调度策略](#调度策略)
-  * [调度相关的数据结构](#调度相关的数据结构)
-  * [优先级](#优先级)
-  * [周期性调度](#周期性调度)
-  * [创建进程](#创建进程)
-  * [进程唤醒](#进程唤醒)
-  * [主调度函数schedule()](#主调度函数schedule())
-* [参考资料](#%E5%8F%82%E8%80%83%E8%B5%84%E6%96%99)
+## O(N)调度器
 
-# Linux缺省调度器
-Operating System | Algorithm
------------- | -------------
-Linux kernel before 2.6.0 | [O(n) scheduler](https://en.wikipedia.org/wiki/O(1)%5fscheduler)
-Linux kernel 2.6.0–2.6.23 | [O(1) scheduler](https://en.wikipedia.org/wiki/O(n)%5fscheduler)
-Linux kernel after 2.6.23 | [Completely Fair Scheduler](https://en.wikipedia.org/wiki/Completely_Fair_Scheduler)
+### 总览
 
-# O(1)调度
-### 运行队列
+
+- 调度器只定义了一个全局 **runqueue** 运行队列，Running 的进程都会被添加到 runqueue 中（无论常规进程还是 RT 进程），当发生进程切换时，调度器从 runqueue 的 head 搜寻到 tail，找到 priority 最高的进程。
+
+- 当 runqueue 中的进程数目逐渐增多，则调度器的效率会出现明显的下降
+
+- 除了 runqueue 队列，系统还有一个囊括所有 task 的链表，链表头定义为 init_task ，在一个调度周期结束（runqueue 中的进程时间片全被用完）后，重新为 task 赋初始时间片的时候会用到该链表
+
+  <img src="pic/On.png" style="zoom:75%;" align="left"/>
+
+  
+### task_struct
+
 ```c
-struct runqueue {
-    spinlock_t lock; /* spin lock that protects this runqueue */
-    unsigned long nr_running; /* number of runnable tasks */
-    unsigned long nr_switches; /* context switch count */
-    unsigned long expired_timestamp; /* time of last array swap */
-    unsigned long nr_uninterruptible; /* uninterruptible tasks */
-    unsigned long long timestamp_last_tick; /* last scheduler tick */
-    struct task_struct *curr; /* currently running task */
-    struct task_struct *idle; /* this processor's idle task */
-    struct mm_struct *prev_mm; /* mm_struct of last ran task */
-    struct prio_array *active; /* active priority array */
-    struct prio_array *expired; /* the expired priority array */
-    struct prio_array arrays[2]; /* the actual priority arrays */
-    struct task_struct *migration_thread; /* migration thread */
-    struct list_head migration_queue; /* migration queue */
-    atomic_t nr_iowait; /* number of tasks waiting on I/O */
+struct task_struct {
+    volatile long need_resched;
+    long counter; // 该进程分配的CPU时间额度，以tick为单位（对于睡眠的进程还有些奖励
+    long nice;    // 普通进程的静态优先级
+    unsigned long policy; // 主要支持三种调度策略：普通进程：SCHED_OTHER   实时进程：SCHED_RR / SCHED_FIFO
+    
+    int processor;
+    unsigned long cpus_runnable, cpus_allowed;
+    
+    struct list_head run_list;
+    unsigned long rt_priority; // RT 进程的优先级
+    ......
 };
 ```
 
-### 优先级数组
+- 调度策略
+  - 顾名思义，*SCHED_RR* 采用时间片轮转
+  - *SCHED_FIFO* 为先到先得，先占有 CPU 的进程会持续执行，直到退出或者阻塞的时候才会让出 CPU
+  
+- CPU 相关
+  - *processor*：该进程正在执行（或者上次执行）的逻辑 CPU 号
+  - *cpus_allowed*：该 task 允许在那些 CPU 上执行的掩码
+  - *cpus_runnable*：计算一个指定的进程是否适合调度到指定的 CPU 上去执行。如果该进程没有被任何 CPU 执行，那么所有的 bit 被设定为 1，如果进程正在被某个 CPU 执行，那么正在执行的 CPU bit 设定为 1，其他设定为 0（来自 *can_schedule* 函数）
+
+- Priority
+
+  - 静态优先级：task 固有的优先级，不会随着进程的行为而改变。普通进程：（20 - nice）， 实时进程：rt_priority
+
+  - 动态优先级：
+
+    - 实际 CPU 调度依赖动态优先级，动态优先级是基于静态优先级计算的（来自 *goodness* 函数）
+
+    - 普通进程的动态优先级
+
+      ```c
+      weight = p->counter;
+      if (!weight)
+      	goto out;
+      weight += 20 - p->nice;
+      ```
+    
+      > 1. 如果该进程的时间片已经耗尽，那么动态优先级是 0，这也意味着在本次调度周期中该进程无法继续获取 CPU 资源
+      >
+      > 2. 如果该进程的时间片还有剩余，那么 `weight = 剩余的时间片 + 静态优先级`，考虑剩余时间片的目的是奖励睡眠的进程
+      >
+      > 3. 调度器也会酌情考虑 Cache 和 TLB 的性能问题，更倾向于被调度到之前的核心；如果备选进程和当前进程共享同一个地址空间，也会得到小小的倾斜
+    
+    - 实时进程的动态优先级
+      ```c
+      weight = 1000 + p->rt_priority;	
+      ```
+      > 加上这个固定偏移 `1000` 是为了和普通进程区分，使 RT 进程能完全优先于普通进程
+      
+
+### 主调度器的核心
+
 ```c
-struct prio_array {
-    int nr_active; /* number of tasks in the queues */
-    unsigned long bitmap[BITMAP_SIZE]; /* priority bitmap */
-    struct list_head queue[MAX_PRIO]; /* priority queues */
-};
+list_for_each(tmp, &runqueue_head) {
+    p = list_entry(tmp, struct task_struct, run_list); // 本次需要检查的进程描述符
+    if (can_schedule(p, this_cpu)) {
+        int weight = goodness(p, this_cpu, prev->active_mm);
+        if (weight > c)
+            c = weight, next = p;
+    }
+}
 ```
-![pic/sched_O1.gif](pic/sched_O1.gif)
 
-### 优先级位图映射
-![pic/sched_O1_2.gif](pic/sched_O1_2.gif)
+- 遍历 runqueue_head 链表上的所有的进程，计算动态优先级，选择并切换
+- 每一个 tick 到来的时候，进程时间片减一 `-- p->counter`，当时间片减到 0 ，调度器剥夺其执行的权力，从而引发一次调度，直到 runqueue 中的所有进程时间片耗尽，然后开始一个新的周期。调度器就这样周而复始，推动整个系统的运作
 
-### O(1)调度算法的问题
-1. 将nice值映射到时间片，就必须将nice值对应到绝对的处理器时间，这会导致进程切换无法最优化进行。例如，两个高nice值（低优先级）的后台进程，往往是CPU密集型，分配到的时间片太短，导致频繁切换。
-2. nice值变化的效果极大的取决于nice的初始值。
-3. 时间片受定时器节拍的影响比较大。
-4. 为提高交互进程性能的优化有可能被利用，打破公平原则，获得更多的处理器时间。
+### 六宗罪
 
-# 完全公平调度（Completely Fair Scheduler）
+1. 随着 runqueue 增大，遍历的开销线性增长，且调度周期结束时，需要对成千上万个进程的时间片进行充值，不仅计算时间开销巨大，还会干掉 *L1 Cache* 中的几乎所有内容（L1 里被换上了用于计算 counter 的内容，于实际任务执行无益）
+
+2. 全局共享一个由 spinlock 保护的 runqueue，对于 SMP 处理器而言 spinlock 的开销将成为性能瓶颈
+
+3. CPU 空转问题：假设平台为树莓派zero2w，每次调度周期结束，总有一个 CPU 负责充值而其他 3 个 CPU 无事可做，只能处于 idle 状态，资源被大大浪费
+
+4. 原本调度器设计有 CPU 亲和性，但是随着 runqueue 中的进程一个个耗尽时间片，CPU 可选择的余地被不断压缩，CPU 经常只能运行一个和它亲和性不大的进程。当时很多人都反映有进程在 CPU 之间跳来跳去，这一现象被称作 CPU bouncing
+
+5. RT 调度的性能问题
+   - RT 进程和普通进程处于同一队列，这导致对于 RT 的调度也要遍历整个 runqueue
+
+   - Linux 2.4 内核不支持抢占式，对于一些比较耗时的系统调用或者中断处理（几个 ms），必须返回用户空间才能启动调度
+
+   - 存在 **优先级翻转** 隐患：对于优先级 A > B > C 的情况，A 被调度时发现 C 正在运行且占用自己正要用的资源，A 睡眠等待，目前为止一切正常。  然后 B 被调度，B 优先级高可以直接运行，这就导致优先级低的优先执行。A：
+
+     <img src="pic/no_bro.jpg" style="zoom:50%;"  >
+
+     > 采用 **优先级继承** 解决：A 被阻塞时，将 C 的优先级暂时提升到 A 的水平，等到 C 释放资源再恢复
+
+6. 调度器无法正确感知进程真正的需求，因为批处理进程会经常阻塞在 Disk I/O 上，而用户进程可能是 计算密集型 的，这导致 睡眠补偿 这一策略并不总是正确的
+
+## O(1) 调度器
+
+### 总览
+
+O(1) 调度器引入了 **per-cpu runqueue** , 系统中所有 runnable 进程首先经过 **负载均衡** 挂入 各 CPU 的 runqueue，spinlock 也被细分为 per-cpu runqueue 中的 `rq->lock`，然后由 主调度器 和 tick 调度器 驱动该 CPU 上的调度行为。（解决了 *第二和第三宗罪*，*第四宗罪* 通过良好的负载均衡解决）
+
+<img src="pic/O1.png" style="zoom:60%;" align="left">
+
+### 引入优先级队列
+
+- O(1) 调度器将原来单个 runqueue 切分为多个不同 priority 的链表：
+
+  ```c
+  struct runqueue {
+      spinlock_t lock;
+  	......    
+      struct prio_array *active;  // 时间片 有剩余
+      struct prio_array *expired; // 时间片 已耗尽
+      struct prio_array arrays[2]; 
+      ......
+  };
+  
+  struct prio_array {
+      int nr_active; // 队列中 task 数量
+      unsigned long bitmap[BITMAP_SIZE]; // 各优先级进程链表是 空 还是 非空
+      struct list_head queue[MAX_PRIO];
+  };
+  ```
+
+  <div style="display: flex; align-items: flex-start;">
+    <img src="pic/runqueue.png" alt="Image" style="zoom:60%; margin-right: 10px;">
+    <div>
+      <pre style="background-color: #f4f4f4; padding: 0px; border-radius: 0px;">
+  <code>
+  /* 如果 active 队列空无一人，则切换两个队列 */
+  if (unlikely(!array->nr_active)) {
+      rq->active = rq->expired;
+      rq->expired = array;
+      array = rq->active;
+  }
+  </code>
+      </pre>
+      <p>随着系统的运行，active 队列的 task 一个个的耗尽其时间片，挂入到 expired 队列，当 active 队列的 task 为空的时候，切换 active 和 expired ，开始一轮新的调度过程。</p>
+    </div>
+  </div>
+
+- 在 O(1) 调度器中，每个 runqueue 支持 140 个优先级：RT 进程 1 ~ 99；普通进程 100 ~ 139 ，分别对应 *nice* 的 -20 ~ 19 。不同优先等级的进程被放入不同的链表中，RT进程 也因此和 普通进程 区分开来，解决了 *第五宗罪*
+
+<img src="pic/sched_O1.gif"  style="zoom:80%;" />
+
+- 识别交互式进程（解决 *第六宗罪* ）
+
+  - 特殊处理的交互式进程
+
+    ```c
+    if (!TASK_INTERACTIVE(p) || EXPIRED_STARVING(rq)) {
+        enqueue_task(p, rq->expired);
+        if (p->static_prio < rq->best_expired_prio)
+        rq->best_expired_prio = p->static_prio;
+    } else {
+    	enqueue_task(p, rq->active);
+    }
+    ```
+
+    *TASK_INTERACTIVE* 用来判断一个进程是否是一个用户交互式进程
+
+    - [ n ]：挂入 expired 队列
+
+    - [ y ]：用户交互型进程，重新挂回 active 队列
+
+      > O(1) 调度器使用非常复杂的算法判断是否为交互式进程，尤其是含有大量的硬编码（通过大量实验场景总结出来的常数）
+
+    *EXPIRED_STARVING* 用于制止 不知好歹 的用户
+
+    - 如果 expired 队列中的进程等待时间过长，说明调度器出现不公平现象，此时即使是用户交互型也会被挂入 expired
+
+### 核心调度算法
+
+> 从 runqueue 的 active 队列中寻找：
+>
+> ```c
+> idx = sched_find_first_bit(array->bitmap);
+> queue = array->queue + idx;
+> next = list_entry(queue->next, task_t, run_list);
+> ```
+>
+> <img src="pic/sched_O1_2.gif" style="zoom: 90%;" align="left" />
+>
+> 首先在对应的 **bitmap** 中寻找第一个非空的进程链表，其第一个节点就是当前最适合被调度的进程。由于没有遍历整个链表的操作，调度器算法复杂度是常量，解决了 *第一宗罪*
+
+至此，O(n) 调度器的六宗罪完全被 O(1) 调度器解决。O(1) 调度器是 Linux 迄今为止（2007.10.08）最伟大的调度器，因此我宣布，从今以后，Linux内核 使用的默认调度器为：
+
+<img src="pic/its_me.png" style="zoom:50%;" >
+
+## 插一脚，关于抢占式内核
+
+​	2.4 时代，大部分的Linux应用都集中在服务器领域，因此选择设计 *非抢占式内核* 无可厚非。不过随着 Linux在桌面和嵌入式领域的渗透，系统响应速度慢慢的称为用户投诉的主要方面，因此，在 2.5 的开发过程中，Linux引入了抢占式内核的概念（CONFIG_PREEMPT）
+
+- 不配置该选项，那么一切与 2.4 内核保持一致
+- 如果配置了该选项，则不需要在返回用户空间的时候才苦苦等到调度点，大部分的内核执行路径都是可以被抢占的
+
+# 完全公平调度
+
+## 公平调度思想的引入
+
+- 传统调度器的问题
+
+  - 时间片悖论
+
+    在 O(n) 与 O(1) 调度器中，时间片是固定分配的，高优先级的获取更多的执行时间。但实际上，需要更多执行时间的 CPU 密集型进程往往在后台执行，优先级理应比较低
+
+  - 卡顿问题
+
+    当一个相当消耗CPU资源的进程启动的时候，现存的那些用户交互程序（例如浏览网页）都可以感觉到明显的延迟。但你无法 100% 穷举所有的交互型进程，就像你无法完全猜中女孩子的心一样
+
+- RSDL 调度器： *开启公平调度的先锋* 
+
+  - **Staircase**：在调度过程中，进程优先级类似台阶那样缓缓降低
+
+    > 假设每个 Priority 配额为 6ms，进程 A 的优先级为120。A 在 Priority=120 的队列中运行 6ms，发生 **Rotating** ，转入 Priority=121 的队列 ...... 如此继续，直至在 Priority=139 的队列也运行完 6ms，此时该进程时间片耗尽， 挂入 expired 队列等待下一个调度周期。
+
+  - **Deadline**：在RSDL算法中，任何一个进程可以准确的预估其调度延迟
+
+    > 假设 runqueue 中有 2 个进程 A 和 B，静态优先级分别为 130 和 139，对于 B 进程，只有 A 沿着优先级阶梯走到 139 的时候才有机会执行，其调度延迟是9 x 6ms ＝ 54ms。
+
+  > RSDL去掉了对进程睡眠 / 运行时间的统计，去掉了对用户交互指数的计算，去掉了那些奇奇怪怪的常数，成就了一个简洁高效的公平调度算法。在 2.5 内核时代被发明，却被众多厂商反向引入 2.4 内核，可见其性能优异。  但可惜的是，RSDL 在高负载时调度效率下降，容易出现调度不公平的情况；设计没有 CFS 简洁易维护；且在需要频繁上下文切换的应用中表现欠佳，实际生产测试不如 CFS
+
+## CFS调度器
 
 ## 调度的目标
-* 任何进程获得的处理器时间是由它自己和其他所有可运行进程nice值的相对差值决定的
-* 任何nice值对应的时间不再是一个绝对值，而是**处理器的使用比**
-* nice值对时间片的作用不再是算术级增加，而是几何级增加
+
+* 任何进程获得的处理器时间是由它自己和其他所有可运行进程 nice 值的相对差值决定的
+* 任何 nice 值对应的时间不再是一个绝对值，而是 **处理器的使用比**
+* nice 值对时间片的作用不再是算术级增加，而是几何级增加
 * 公平调度，确保每个进程有公平的处理器使用比
 
 ## 算术级数、几何级数与增长率
@@ -81,9 +257,9 @@ struct prio_array {
 ### 增长率
 ![pic/rate_of_return-sp.png](pic/rate_of_return-sp.png "$$ r = \cfrac{V_{f} - V_{i}}{V_{i}} $$")
 
-_V<sub>f</sub>_：最终值
+_V <sub> f </sub>_：最终值
 
-_V<sub>i</sub>_：初始值
+_V <sub> i </sub>_：初始值
 
 
 ### 算术级数
@@ -93,9 +269,9 @@ _V<sub>i</sub>_：初始值
 ---|---|---|---|---|---|---
 增长率|-|100%|50%|33%|25%|16.67%
 
-如果采用算术级数，比如相邻两个nice值之间差额是5ms，
-* 进程A的nice值为0，进程B的nice值为1，则它们分别映射到时间片100ms和95ms，差别并不大
-* 进程A的nice值为18，进程B的nice值为19，则它们分别映射到时间片10ms和5ms，前者比后者多了100%的处理器时间
+如果采用算术级数，比如相邻两个 nice 值之间差额是 5ms，
+* 进程 A 的 nice 值为 0，进程 B 的 nice 值为 1，则它们分别映射到时间片 100ms 和 95ms，差别并不大
+* 进程 A 的 nice 值为 18，进程 B 的 nice 值为 19，则它们分别映射到时间片 10ms 和 5ms，前者比后者多了 100%的处理器时间
 
 ### 几何级数
 数列中的数按固定的增长率增长。如增长率是正的，越往后增长幅度越大。
@@ -104,9 +280,9 @@ _V<sub>i</sub>_：初始值
 ---|---|---|---|---|---|---
 增长率|-|100%|100%|100%|100%|100%
 
-如果采用几何级数，比如说，增长率约为-20%，目标延迟是20ms，
-* 进程A的nice值为0，进程B的nice值为5，则它们分别获得的处理器时间15ms和5ms
-* 进程A的nice值为10，进程B的nice值为15，它们分别获得的处理器时间仍然是15ms和5ms
+如果采用几何级数，比如说，增长率约为-20%，目标延迟是 20ms，
+* 进程 A 的 nice 值为 0，进程 B 的 nice 值为 5，则它们分别获得的处理器时间 15ms 和 5ms
+* 进程 A 的 nice 值为 10，进程 B 的 nice 值为 15，它们分别获得的处理器时间仍然是 15ms 和 5ms
 
 > **目标延迟（targeted latency）**
 > Each process then runs for a “timeslice” proportional to its weight divided by the total
@@ -125,16 +301,16 @@ _V<sub>i</sub>_：初始值
 > millisecond, to ensure there is a ceiling on the incurred switching costs.
 
 ## 基本原理
-* 设定一个调度周期（`sched_latency_ns`），目标是让每个进程在这个周期内至少有机会运行一次。换一种说法就是每个进程等待CPU的时间最长不超过这个调度周期。
-* 根据进程的数量，大家平分这个调度周期内的CPU使用权，由于进程的优先级即nice值不同，分割调度周期的时候要加权。
-* 每个进程的经过加权后的累计运行时间保存在自己的`vruntime`字段里。
-* 哪个进程的`vruntime`最小就获得本轮运行的权利。
+* 设定一个调度周期（`sched_latency_ns`），目标是让每个进程在这个周期内至少有机会运行一次。换一种说法就是每个进程等待 CPU 的时间最长不超过这个调度周期。
+* 根据进程的数量，大家平分这个调度周期内的 CPU 使用权，由于进程的优先级即 nice 值不同，分割调度周期的时候要加权。
+* 每个进程的经过加权后的累计运行时间保存在自己的 `vruntime` 字段里。
+* 哪个进程的 `vruntime` 最小就获得本轮运行的权利。
 
 ## 原理解析
 
 ### 静态优先级与权重
-* 将进程的nice值映射到对应的权重
-  * 数组项之间的乘数因子为1.25，这样概念上可以使进程每降低一个nice值可以多获得10%的CPU时间，每升高一个nice值则放弃10%的CPU时间。
+* 将进程的 nice 值映射到对应的权重
+  * 数组项之间的乘数因子为 1.25，这样概念上可以使进程每降低一个 nice 值可以多获得 10%的 CPU 时间，每升高一个 nice 值则放弃 10%的 CPU 时间。
   * kernel/sched/core.c
 ```c
 const int sched_prio_to_weight[40] = {
@@ -149,14 +325,14 @@ const int sched_prio_to_weight[40] = {
 };
 ```
 
-  由此可见，**nice值越小, 进程的权重越大**。
+  由此可见，**nice 值越小, 进程的权重越大**。
 
 * 静态优先级与权重之间的关系，分普通和实时进程两种情况
 ![pic/sched_weight_priority.png](pic/sched_weight_priority.png)
 
-### CFS里的调度周期
-* CFS调度器的调度周期由`sysctl_sched_latency`变量保存。
-  * 该变量可以通过`sysctl`调整，见kernel/sysctl.c
+### CFS 里的调度周期
+* CFS 调度器的调度周期由 `sysctl_sched_latency` 变量保存。
+  * 该变量可以通过 `sysctl` 调整，见 kernel/sysctl.c
 ```sh
        $ sysctl kernel.sched_latency_ns
        kernel.sched_latency_ns = 24000000
@@ -164,7 +340,7 @@ const int sched_prio_to_weight[40] = {
        kernel.sched_min_granularity_ns = 3000000
 ```
 
-  * 任务过多的时候调度周期会延长，见kernel/sched/fair.c
+  * 任务过多的时候调度周期会延长，见 kernel/sched/fair.c
 ```c
 /*
  * The idea is to set a period in which each task runs once.
@@ -182,9 +358,9 @@ static u64 __sched_period(unsigned long nr_running)
         return sysctl_sched_latency;
 }
 ```
-### CFS里关于时间计算的两个公式
+### CFS 里关于时间计算的两个公式
 
-#### 公式1
+#### 公式 1
 * 一个进程在一个调度周期中的运行时间为:
 ```js
     分配给进程的运行时间 = 调度周期 * 进程权重 / 所有可运行进程权重之和
@@ -192,7 +368,7 @@ static u64 __sched_period(unsigned long nr_running)
 
   可以看到, 进程的权重越大，分到的运行时间越多。
 
-#### 公式2
+#### 公式 2
 * 一个进程的实际运行时间和虚拟运行时间之间的关系为:
 ```js
     vruntime = 实际运行时间 * NICE_0_LOAD / 进程权重
@@ -201,35 +377,35 @@ static u64 __sched_period(unsigned long nr_running)
 ```
 ![pic/sched_realtime_vs_vruntime.png](pic/sched_realtime_vs_vruntime.png)
 
-* 可以看到, **进程权重越大, 运行同样的实际时间, vruntime增长的越慢**。
+* 可以看到, **进程权重越大, 运行同样的实际时间, vruntime 增长的越慢**。
 
-### 关于CFS的公平性的推理
+### 关于 CFS 的公平性的推理
 * 一个进程在一个调度周期内的虚拟运行时间大小为:
 ```js
     vruntime = 进程在一个调度周期内的实际运行时间 * NICE_0_LOAD / 进程权重
              = (调度周期 * 进程权重 / 所有进程总权重) * NICE_0_LOAD / 进程权重
              = 调度周期 * NICE_0_LOAD / 所有可运行进程总权重
 ```
-  可以看到，一个进程在一个调度周期内的`vruntime`值大小是不和该进程自己的权重相关的，所以所有进程的`vruntime`值大小都是一样的。
+  可以看到，一个进程在一个调度周期内的 `vruntime` 值大小是不和该进程自己的权重相关的，所以所有进程的 `vruntime` 值大小都是一样的。
 
-* 在非常短的时间内，也许看到的`vruntime`值并不相等。
-  * `vruntime`值小，说明它以前占用cpu的时间较短，受到了“不公平”对待。
-  * 但为了确保公平，我们**总是选出`vruntime`最小的进程来运行**，形成一种“追赶”的局面。
+* 在非常短的时间内，也许看到的 `vruntime` 值并不相等。
+  * `vruntime` 值小，说明它以前占用 cpu 的时间较短，受到了“不公平”对待。
+  * 但为了确保公平，我们 **总是选出 `vruntime` 最小的进程来运行**，形成一种“追赶”的局面。
   * 这样既能公平选择进程，又能保证高优先级进程获得较多的运行时间。
 
 
-* 理想情况下，由于`vruntime`与进程自身的权重是不相关的，所有进程的`vruntime`值是一样的。
+* 理想情况下，由于 `vruntime` 与进程自身的权重是不相关的，所有进程的 `vruntime` 值是一样的。
 
 * 怎么解释进程间的实际执行时间与它们的权重是成比例的？
-  * 假设有进程A，其虚拟运行时间为`vruntime_A`，其实际运行的时间为`delta_exec_A`，权重为`weight_A`，于是`vruntime_A = delta_exec_A * NICE_0_LOAD / weight_A`
-  * 假设有进程B，其虚拟运行时间为`vruntime_B`，其实际运行的时间为`delta_exec_B`，权重为`weight_B`，于是`vruntime_B = delta_exec_B * NICE_0_LOAD / weight_B`
+  * 假设有进程 A，其虚拟运行时间为 `vruntime_A`，其实际运行的时间为 `delta_exec_A`，权重为 `weight_A`，于是 `vruntime_A = delta_exec_A * NICE_0_LOAD / weight_A`
+  * 假设有进程 B，其虚拟运行时间为 `vruntime_B`，其实际运行的时间为 `delta_exec_B`，权重为 `weight_B`，于是 `vruntime_B = delta_exec_B * NICE_0_LOAD / weight_B`
   * 由于进程虚拟运行时间相同，即 `vruntime_A == vruntime_B`，
   * 则 `delta_exec_A * NICE_0_LOAD / weight_A == vruntime_B = delta_exec_B * NICE_0_LOAD / weight_B`
   * 也就是 `delta_exec_A : delta_exec_B == weight_A : weight_B`
 
   可见进程间的实际执行时间和它们的权重也是成比例的。
 
-* 各个进程追求的公平时间`vruntime`其实就是一个nice值为0的进程在一个调度周期内应分得的时间，就像是一个基准。
+* 各个进程追求的公平时间 `vruntime` 其实就是一个 nice 值为 0 的进程在一个调度周期内应分得的时间，就像是一个基准。
 
 # 核心调度器
 
@@ -335,11 +511,11 @@ deadline|SCHED_DEADLINE
 
 ## stop-task，idle-task 与 SCHED_IDLE
 
-* `stop`任务是系统中优先级最高的任务，它可以抢占所有的进程并且不会被任何进程抢占，其专属调度器类即`stop-task`。
-* `idle-task`调度器类与 CFS 里要处理的`SCHED_IDLE`没有关系。
-* `idle`任务会被任意进程抢占，其专属调度器类为`idle-task`。
-* `idle-task`和`stop-task`没有对应的调度策略。
-* 采用`SCHED_IDLE`调度策略的任务其调度器类为 **CFS**。
+* `stop` 任务是系统中优先级最高的任务，它可以抢占所有的进程并且不会被任何进程抢占，其专属调度器类即 `stop-task`。
+* `idle-task` 调度器类与 CFS 里要处理的 `SCHED_IDLE` 没有关系。
+* `idle` 任务会被任意进程抢占，其专属调度器类为 `idle-task`。
+* `idle-task` 和 `stop-task` 没有对应的调度策略。
+* 采用 `SCHED_IDLE` 调度策略的任务其调度器类为 **CFS**。
 
 > The stop task is the highest priority task in the system, it preempts
 > everything and will be preempted by nothing.
@@ -508,7 +684,7 @@ void cpu_startup_entry(enum cpuhp_state state)
 ## 调度相关的数据结构
 
 ### 进程结构 task_struct
-* include/linux/sched.h::task_struct
+* include/linux/sched.h:: task_struct
 ```c
 struct task_struct {
 ...
@@ -526,19 +702,19 @@ struct task_struct {
 }
 ```
 * 优先级 `prio`, `static_prio`, `normal_prio`
-  * **静态优先级**`static_prio` 进程启动时的优先级，除非用`nice`或`sched_setscheduler`修改，否则进程运行期间一直保持恒定。
-  * **普通优先级**`normal_prio` 基于进程静态优先级和调度策略计算出的优先级。进程fork时，子进程继承的是普通优先级。
-  * **动态优先级**`prio` 暂时的，非持久的优先级，调度器考虑的是这个优先级。
-* **实时进程优先级**`rt_priority` 值越大表示优先级越高（后面会看计算的时候用的是减法）。
-* `sched_class` 指向调度器类。在fork的时候会根据优先级决定进程该采用哪种调度策略。
-* 调度实体`se`, `rt`, `dl`
-  * 调度器调度的是*可调度实体*，而不限于进程
-  * 一组进程可以构成一个*可调度实体*，实现*组调度*
+  * **静态优先级** `static_prio` 进程启动时的优先级，除非用 `nice` 或 `sched_setscheduler` 修改，否则进程运行期间一直保持恒定。
+  * **普通优先级** `normal_prio` 基于进程静态优先级和调度策略计算出的优先级。进程 fork 时，子进程继承的是普通优先级。
+  * **动态优先级** `prio` 暂时的，非持久的优先级，调度器考虑的是这个优先级。
+* **实时进程优先级** `rt_priority` 值越大表示优先级越高（后面会看计算的时候用的是减法）。
+* `sched_class` 指向调度器类。在 fork 的时候会根据优先级决定进程该采用哪种调度策略。
+* 调度实体 `se`, `rt`, `dl`
+  * 调度器调度的是 *可调度实体*，而不限于进程
+  * 一组进程可以构成一个 *可调度实体*，实现 *组调度*
   * 注意：这里用的都是实体而不是指针
-* `SCHED_IDLE`进程**不负责**调度空闲进程。空闲进程由内核提供单独的机制来处理。
+* `SCHED_IDLE` 进程 **不负责** 调度空闲进程。空闲进程由内核提供单独的机制来处理。
 
 ### 调度器类 sched_class
-* kernel/sched/sched.h::sched_class
+* kernel/sched/sched.h:: sched_class
 ```c
 struct sched_class {
     const struct sched_class *next;
@@ -590,23 +766,23 @@ struct sched_class {
 * `next` 指向下一个调度器类。
 * `enqueue_task` 向运行队列添加新进程。
 * `dequeue_task` 从运行队列删除进程。
-* `yield_task` 进程自愿放弃对处理器的控制权，相应的系统调用为`sched_yield`。
+* `yield_task` 进程自愿放弃对处理器的控制权，相应的系统调用为 `sched_yield`。
 * `yield_to_task` 让出处理器，并期望将控制权交给指定的进程。
 * `pick_next_task` 选择下一个将要运行的进程。
-* `put_prev_task` 用另外一个进程**替换当前进程之前**调用。
+* `put_prev_task` 用另外一个进程 **替换当前进程之前** 调用。
 * `set_curr_task` 改变当前进程的调度策略时调用。
 * `task_tick` 每次激活周期性调度器时，由周期性调度器调用。
-* `task_fork` 用于建立`fork`系统调用和调度器之间的关联，在`sched_fork()`函数中被调用。
-* `get_rr_interval` 返回进程的缺省时间片，对于CFS返回的是该调度周期内分配的实际时间片。相关系统调用为`sched_rr_get_interval`。
+* `task_fork` 用于建立 `fork` 系统调用和调度器之间的关联，在 `sched_fork()` 函数中被调用。
+* `get_rr_interval` 返回进程的缺省时间片，对于 CFS 返回的是该调度周期内分配的实际时间片。相关系统调用为 `sched_rr_get_interval`。
 * `update_curr` 更新当前进程的运行时间统计。
 * `check_preempt_curr` 检查当前进程是否需要重新调度。
 
 ### 运行队列 rq
-* 每个CPU有各自的运行队列
-* 各个活动进程只出现在一个运行队列中。在多个CPU上运行同一个进程是不可能的
+* 每个 CPU 有各自的运行队列
+* 各个活动进程只出现在一个运行队列中。在多个 CPU 上运行同一个进程是不可能的
 * 发源于同一进程的线程可以在不同 CPU 上执行
 * **注意**：特定于调度器类的子运行队列是实体，而不是指针
-* kernel/sched/sched.h::rq
+* kernel/sched/sched.h:: rq
 ```c
 /*
  * This is the main, per-CPU runqueue data structure.
@@ -629,24 +805,24 @@ struct rq {
 ```
 * `nr_running` 队列上可运行进程的数目，**不考虑优先级或调度类**。
 * `load` 运行队列当前的累计权重。
-* `curr` 指向当前运行进程的`task_struct`实例。
-* `idle` 指向空闲进程的`task_struct`实例。该进程在没有其他可运行进程时执行。
+* `curr` 指向当前运行进程的 `task_struct` 实例。
+* `idle` 指向空闲进程的 `task_struct` 实例。该进程在没有其他可运行进程时执行。
 * `clock` 每个运行队列的时钟。每次周期性调度器被调用的时候会更新这个值。
 
 #### runqueues
-* 系统的所有运行队列都在`runqueues`数组中，该数组中的每一个元素对应于系统中的一个CPU
+* 系统的所有运行队列都在 `runqueues` 数组中，该数组中的每一个元素对应于系统中的一个 CPU
 * kernel/sched/core.c
 ```c
 DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 ```
-在SMP开启的情况下该宏展开为：
+在 SMP 开启的情况下该宏展开为：
 ```c
 __percpu __attribute__((section(".data..percpu..shared_aligned"))) \
   __typeof__(struct rq) runqueues \
   ____cacheline_aligned_in_smp;
 ```
-关于kernel的Per-CPU变量值得用一篇文章来详叙，这里不深入讲解。
-Per-CPU相关代码见：
+关于 kernel 的 Per-CPU 变量值得用一篇文章来详叙，这里不深入讲解。
+Per-CPU 相关代码见：
 * include/linux/percpu-defs.h
 * include/asm-generic/percpu.h
 * include/linux/compiler-gcc.h
@@ -664,9 +840,9 @@ Per-CPU相关代码见：
 
 ### 计算优先级
 * `static_prio` 通常是优先级计算的起点
-* `prio` 是调度器关心的优先级，通常由`effective_prio()`计算，计算时考虑当前的优先级的值
+* `prio` 是调度器关心的优先级，通常由 `effective_prio()` 计算，计算时考虑当前的优先级的值
 * `prio` 有可能会因为 *非实时进程* 要使用实时互斥量(RT-Mutex)而临时提高优先级至实时优先级
-* `normal_prio` 通常由`normal_prio()`计算，计算时考虑调度策略的因素
+* `normal_prio` 通常由 `normal_prio()` 计算，计算时考虑调度策略的因素
 
 ```c
 /*
@@ -717,9 +893,9 @@ static int effective_prio(struct task_struct *p)
     return p->prio; /*返回继承的 RT boosted 优先级*/
 }
 ```
-* `fork`子进程时
-  * 子进程的静态优先级`static_prio`继承自父进程
-  * 动态优先级`prio`设置为父进程的普通优先级`normal_prio`。这是为了确保实时互斥量引起的优先级提高 **不会** 传递到子进程
+* `fork` 子进程时
+  * 子进程的静态优先级 `static_prio` 继承自父进程
+  * 动态优先级 `prio` 设置为父进程的普通优先级 `normal_prio`。这是为了确保实时互斥量引起的优先级提高 **不会** 传递到子进程
 
 
 ## 创建进程
@@ -848,12 +1024,12 @@ void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 ```
 
 ## 周期性调度
-* 每次周期性的时钟中断，时钟中断处理函数会地调用`update_process_times()`
+* 每次周期性的时钟中断，时钟中断处理函数会地调用 `update_process_times()`
   * kernel/time/timer.c
 
   ![pic/sched_update_process_times.png](pic/sched_update_process_times.png)
 
-* `scheduler_tick()`函数为周期性调度的入口，
+* `scheduler_tick()` 函数为周期性调度的入口，
   1. 管理内核中与整个系统和各个进程的调度相关的统计量
   2. 调用当前进程所属调度器类的周期性调度方法
   * kernel/sched/core.c
@@ -878,23 +1054,23 @@ void scheduler_tick(void)
 ...
 }
 ```
-* 如果需要重新调度，`curr->sched_class->task_tick()`会在`task_struct`（更准确的说是在`thread_info`）中设置`TIF_NEED_RESCHED`标志位表示请求重新调度
-* 但**并不意味着立即抢占**，仍然需要等待内核在适当的时间完成该请求（参考[这里](http://www.linuxinternals.org/blog/2016/03/20/tif-need-resched-why-is-it-needed/)）
+* 如果需要重新调度，`curr->sched_class->task_tick()` 会在 `task_struct`（更准确的说是在 `thread_info`）中设置 `TIF_NEED_RESCHED` 标志位表示请求重新调度
+* 但 **并不意味着立即抢占**，仍然需要等待内核在适当的时间完成该请求（参考 [这里](http://www.linuxinternals.org/blog/2016/03/20/tif-need-resched-why-is-it-needed/)）
 
 
 ## 进程唤醒
 
 ![pic/sched_core_wakeup.png](pic/sched_core_wakeup.png)
 
-* 进程唤醒的时候，将`enqueue_task`和`check_preempt_curr`等工作 *委托* 给具体的调度器类。
+* 进程唤醒的时候，将 `enqueue_task` 和 `check_preempt_curr` 等工作 *委托* 给具体的调度器类。
 * 进程唤醒过程中与调度器相关的任务
   * 进程重新放入运行队列
   * 进程是否需要重新调度
 
 
-## 主调度函数schedule()
+## 主调度函数 schedule()
 
-* `__schedule()`是主调度函数，其主要任务是：
+* `__schedule()` 是主调度函数，其主要任务是：
   * 选出下一个将要调度的进程
   * 切换到要调度的进程
   * kernel/sched/core.c
@@ -1006,16 +1182,16 @@ void scheduler_tick(void)
      balance_callback(rq);
 }
 ```
-* 调完`__schedule()`后，都需要重新调用`need_resched()`检查`TIF_NEED_RESCHED`标志看是否需要重新调度。
-* `context_switch()`调用特定于体系结构的方法，由后者负责执行底层的上下文切换。
+* 调完 `__schedule()` 后，都需要重新调用 `need_resched()` 检查 `TIF_NEED_RESCHED` 标志看是否需要重新调度。
+* `context_switch()` 调用特定于体系结构的方法，由后者负责执行底层的上下文切换。
 * 上下文切换通过调用两个特定于处理器的函数完成：
-  * **switch_mm**： 更换通过`task_struct->mm`描述的内存管理单元。
+  * **switch_mm**： 更换通过 `task_struct->mm` 描述的内存管理单元。
   * **switch_to**： 切换处理器寄存器内容和内核栈。
-  * **惰性FPU模式** (Lazy FPU mode)
+  * **惰性 FPU 模式** (Lazy FPU mode)
 
 ### 选择下一个进程
-* `pick_next_task()`完成选择下一个进程的工作
-  * kernel/sched/core.c::pick_next_task
+* `pick_next_task()` 完成选择下一个进程的工作
+  * kernel/sched/core.c:: pick_next_task
 ```c
 /*
  * Pick up the highest-prio task:
@@ -1057,10 +1233,11 @@ again:
 }
 ```
 
-* `pick_next_task()`对所有进程都是 CFS class 的情况做了些优化
+* `pick_next_task()` 对所有进程都是 CFS class 的情况做了些优化
 * 主要工作还是 *委托* 给各调度器类去完成
 
 # 参考资料
+* [O(n)  O(1) 和 CFS 调度器](http://www.wowotech.net/process_management/scheduler-history.html) *
 * Linux Kernel Development (3rd Edition), Robert Love
 * Professional Linux Kernel Architecture, Wolfgang Mauerer
 * https://en.wikipedia.org/wiki/Scheduling_%28computing%29
@@ -1071,7 +1248,6 @@ again:
 * https://en.wikipedia.org/wiki/Strategy_pattern
 * https://sourcemaking.com/design_patterns/strategy
 * http://www.ibm.com/developerworks/cn/linux/l-cn-scheduler/index.html
-* http://linuxperf.com/?p=42
 * [TIF_NEED_RESCHED: Why Is It Needed](http://www.linuxinternals.org/blog/2016/03/20/tif-need-resched-why-is-it-needed/)
 * [What Does an Idle CPU Do?](http://duartes.org/gustavo/blog/post/what-does-an-idle-cpu-do/)
 - [LWN：Linux 新的 EEVDF 调度器！](https://mp.weixin.qq.com/s/MqAzzGU8JCV90wUUWUJbyQ)

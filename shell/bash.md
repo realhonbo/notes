@@ -104,10 +104,62 @@ nmcli dev wifi
 nmcli device
 " 连接wifi "
 sudo nmcli dev wifi connect Linux01 password mmmmmmmm (wep-key-type key ifname wlan0)
-# ubuntu24以上
-sudo vi /etc/netplan/<一个yaml文件>.yaml # 50-cloud-init.yaml
->>> 文件内容改为:
-# Route Wifi
+
+"win: cmd / powershell"
+arp -a 		# 查看 usb 网口共享的网络
+接口: 192.168.137.1 --- 0x9
+  Internet 地址         物理地址              类型
+  192.168.137.44        2c-cf-67-1a-b6-fa     静态 # 共享给 RPI-5
+  192.168.137.255       ff-ff-ff-ff-ff-ff     静态
+  224.0.0.2             01-00-5e-00-00-02     静态
+  224.0.0.22            01-00-5e-00-00-16     静态
+  224.0.0.251           01-00-5e-00-00-fb     静态
+  224.0.0.252           01-00-5e-00-00-fc     静态
+  224.2.2.2             01-00-5e-02-02-02     静态
+  239.255.255.250       01-00-5e-7f-ff-fa     静态
+  255.255.255.255       ff-ff-ff-ff-ff-ff     静态
+
+" 恢复网络代理 "
+unset http_proxy
+unset https_proxy
+unset ftp_proxy
+unset socks_proxy
+
+" 监视流量 "
+bmon  # 监视网络上下行
+
+" 查看ip "
+ip addr (Ubuntu 24.04)
+
+" 网络测试 "
+speedtest
+nc <IP> <Port>
+# windows建议用telnet替代，而不是nmap：
+telnet <IP> <Port>
+
+" 文件传输 "
+scp -r tools/ boboo@192.168.10.158:/home/boboo # tools下的全部文件传输到rpi-5
+scp -r boboo@192.168.10.158:~/dht22_driver A:/ # 将树莓派上的文件夹放入A盘
+scp -r boboo@192.168.10.158:~/dht22_driver ~/  # 在主机而非树莓派上操作!
+
+python -m http.server 8080 # 打开端口供Host访问(在vscode中使用,xterm普遍存在问题
+
+"remote"
+ssh-keygen -t rsa -b 4096
+echo "<获取到的密匙>" >> ~/.ssh/authorized_keys
+```
+
+<img src="pic/remotessh.png" style="zoom:40%;" />
+
+> 以下为详细网络配置， 建议折叠：
+
+```bash
+
+sudo vi /etc/netplan/50-cloud-init.yaml # 也可以是其他的 yaml 文件
+
+> 内容修改为:
+
+# 动态 WIFI 配置
 network:
     version: 2
     wifis:
@@ -118,20 +170,19 @@ network:
                     password: "QWER147258369@"
             dhcp4: true
             optional: true
-# hotpot
+            
+# 动态 Ethernet 配置
+# 在 config.txt 中关闭wifi
 network:
-    version: 2
-    wifis:
-        renderer: networkd
-        wlan0:
-            access-points:
-                "Linux01":
-                    password: "mmmmmmmm"
-            dhcp4: true
-            optional: true
+     version: 2
+     ethernets:
+         eth0:
+             dhcp4: true
+             optional: true
 >
-sudo netplan try # 按Enter结束
+sudo netplan generate # 按Enter结束
 sudo netplan apply
+
 ---------------固定ip版本--------------------
 network:
     version: 2
@@ -153,57 +204,30 @@ network:
                   - 192.168.1.1
             optional: true
 
-network:
-    version: 2
-    wifis:
-        renderer: networkd
-        wlan0:
-            access-points:
-                "Linux01":
-                    password: "mmmmmmmm"
-            dhcp4: false
-            addresses: [192.168.137.62/24]
-            routes:
-              - to: default
-                via: 192.168.1.1
-                metric: 100
-                on-link: true
-            nameservers:
-                addresses:
-                  - 192.168.1.1
-            optional: true
-            
-            
-" 恢复网络代理 "
-unset http_proxy
-unset https_proxy
-unset ftp_proxy
-unset socks_proxy
+### 法2
+sudo vi /boot/wpa_supplicant.conf
 
-" 监视流量 "
-bmon  # 监视网络上下行
+country=CN
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
 
-" 查看ip "
-ip addr (Ubuntu 24.04)
+network={
+ssid="未知网络"
+psk="QWER147258369@"
+key_mgmt=WPA-PSK
+priority=1
+}
 
-" 网络测试 "
-nc <IP> <Port>
-# windows建议用telnet替代，而不是nmap：
-telnet <IP> <Port>
-
-" 文件传输 "
-scp -r tools/ boboo@192.168.10.158:/home/boboo # tools下的全部文件传输到rpi-5
-scp -r boboo@192.168.10.158:~/dht22_driver A:/ # 将树莓派上的文件夹放入A盘
-scp -r boboo@192.168.10.158:~/dht22_driver ~/  # 在主机而非树莓派上操作!
-
-python -m http.server 8080 # 打开端口供Host访问(在vscode中使用,xterm普遍存在问题
-
-"remote"
-ssh-keygen -t rsa -b 4096
-echo "<获取到的密匙>" >> ~/.ssh/authorized_keys
+network={
+ssid="Linux01"
+psk="mmmmmmmm"
+key_mgmt=WPA-PSK
+priority=5
+scan_ssid=1
+}
 ```
 
-<img src="pic/remotessh.png" style="zoom:40%;" />
+
 
 ## stream
 
@@ -326,6 +350,8 @@ echo yes | sudo apt install bear
 echo yes | sudo apt install net-tools
 echo yes | sudo apt install btop
 echo yes | sudo apt install libgpiod-dev
+echo yes | sudo apt install dphys-swapfile
+echo yes | sudo apt install speedtest-cli
 ```
 
 ### 配置项
@@ -353,14 +379,17 @@ echo yes | sudo apt install libgpiod-dev
   ```bash
   sudo vi /etc/dphys-swapfile
   
-  > CONF_SWAPSIZE=2048
+  > CONF_SWAPSIZE=2048 # 固定配置 swap 空间的大小
+  > CONF_SWAPFACTOR=2  # 动态配置为 DRAM * 2
   > CONF_MAXSWAP=8192  # 此选项为 swap 的最大限制值
   #  不过这个选项貌似只能在 /sbin/dphys-swapfile 里面修改才生效
   
-  sudo /etc/init.d/dphys-swapfile restart
+  # sudo /etc/init.d/dphys-swapfile restart
+  sudo dphys-swapfile setup  # 删除原来的交换文件，并重新创建它以适应新定义的大小
+  sudo dphys-swapfile swapon # 启用 swap
   
   free -h # 查看更改后的大小
   ```
-
+  
   
 

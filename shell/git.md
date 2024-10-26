@@ -9,7 +9,7 @@ ssh-keygen -t rsa -C "phdharvey@gmail.com"
 
 git config --global user.name "Honbo"
 git config --global user.email "hehongbo918@gmail.com"
-ssh-keygen -t rsa -C "hehongbo918@gmail.com" G
+ssh-keygen -t rsa -C "hehongbo918@gmail.com"
 ```
 
 ## 操作
